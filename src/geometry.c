@@ -1,16 +1,3 @@
-/*
- * Owns:
- *   clip_to_bbox()      — Sutherland-Hodgman polygon clipping
- *   cell_area()         — Shoelace formula for cell area
- *   flag_underserved()  — Max-heap ranked underserved zone detection
- *
- * Dependencies:
- *   voronoi.h  — DCEL structs (vertex_t, half_edge_t, face_t, dcel_t)
- *   kd.h       — point_t typedef
- *
- * Compile: gcc -std=c11 -O2 -Wall -Wextra -fPIC -Isrc -c src/geometry.c -o src/geometry.o
- */
-
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -21,30 +8,28 @@
 
 /* Internal helpers */
 
-/* Simple dynamic 2D-point buffer used during clipping */
 typedef struct {
     double x;
     double y;
 } vec2_t;
 
-/* ---- Sutherland-Hodgman helpers ---- */
+/* Sutherland-Hodgman helpers 
+ *
+ * edge_code: 0 = left, 1 = right, 2 = bottom, 3 = top
+ */
 
-/* Returns 1 if point (px,py) is on the "inside" of clip edge.
- * Clip edges are axis-aligned lines of the bounding box.
- * edge_code: 0=left, 1=right, 2=bottom, 3=top                */
 static int is_inside(double px, double py, int edge_code,
                      double xmin, double ymin, double xmax, double ymax)
 {
     switch (edge_code) {
-        case 0: return px >= xmin;   /* left   */
-        case 1: return px <= xmax;   /* right  */
-        case 2: return py >= ymin;   /* bottom */
-        case 3: return py <= ymax;   /* top    */
+        case 0: return px >= xmin;
+        case 1: return px <= xmax;
+        case 2: return py >= ymin;
+        case 3: return py <= ymax;
     }
     return 0;
 }
 
-/* Compute intersection of segment A->B with the clip edge.     */
 static vec2_t intersect_edge(vec2_t a, vec2_t b, int edge_code,
                              double xmin, double ymin,
                              double xmax, double ymax)
@@ -56,22 +41,22 @@ static vec2_t intersect_edge(vec2_t a, vec2_t b, int edge_code,
 
     switch (edge_code) {
         case 0: /* left   x = xmin */
-            t = (xmin - a.x) / dx;
+            if (fabs(dx) > 1e-15) t = (xmin - a.x) / dx;
             p.x = xmin;
             p.y = a.y + t * dy;
             break;
         case 1: /* right  x = xmax */
-            t = (xmax - a.x) / dx;
+            if (fabs(dx) > 1e-15) t = (xmax - a.x) / dx;
             p.x = xmax;
             p.y = a.y + t * dy;
             break;
         case 2: /* bottom y = ymin */
-            t = (ymin - a.y) / dy;
+            if (fabs(dy) > 1e-15) t = (ymin - a.y) / dy;
             p.x = a.x + t * dx;
             p.y = ymin;
             break;
         case 3: /* top    y = ymax */
-            t = (ymax - a.y) / dy;
+            if (fabs(dy) > 1e-15) t = (ymax - a.y) / dy;
             p.x = a.x + t * dx;
             p.y = ymax;
             break;
@@ -79,8 +64,10 @@ static vec2_t intersect_edge(vec2_t a, vec2_t b, int edge_code,
     return p;
 }
 
-/* Clip polygon (in_pts, in_n) against one axis-aligned edge.
- * Writes result into out_pts, returns new vertex count.         */
+/*
+ * Clip polygon (in_pts, in_n) against one axis-aligned edge.
+ * Writes result into out_pts, returns new vertex count.
+ */
 static int clip_against_edge(const vec2_t *in_pts, int in_n,
                              vec2_t *out_pts,
                              int edge_code,
@@ -98,27 +85,28 @@ static int clip_against_edge(const vec2_t *in_pts, int in_n,
         int b_in = is_inside(b.x, b.y, edge_code, xmin, ymin, xmax, ymax);
 
         if (a_in && b_in) {
-            /* Both inside → emit B */
+            /* Both inside -> emit B */
             out_pts[out_n++] = b;
         } else if (a_in && !b_in) {
-            /* A inside, B outside → emit intersection */
+            /* A inside, B outside -> emit intersection */
             out_pts[out_n++] = intersect_edge(a, b, edge_code,
                                               xmin, ymin, xmax, ymax);
         } else if (!a_in && b_in) {
-            /* A outside, B inside → emit intersection then B */
+            /* A outside, B inside -> emit intersection then B */
             out_pts[out_n++] = intersect_edge(a, b, edge_code,
                                               xmin, ymin, xmax, ymax);
             out_pts[out_n++] = b;
         }
-        /* Both outside → emit nothing */
+        /* Both outside -> emit nothing */
 
-        if (out_n >= MAX_CLIP_VERTS - 2) break;  /* safety */
+        if (out_n >= MAX_CLIP_VERTS - 2) break;
     }
     return out_n;
 }
 
-/* Collect the vertex ring of a face into a vec2_t array.
- * Returns the number of vertices collected.                     */
+/*
+ * Walk the face's outer_edge ring and collect origin vertices.
+ */
 static int collect_face_vertices(face_t *f, vec2_t *buf, int max_n)
 {
     if (!f || !f->outer_edge) return 0;
@@ -138,15 +126,21 @@ static int collect_face_vertices(face_t *f, vec2_t *buf, int max_n)
     return n;
 }
 
-/* Rebuild a face's half-edge ring from a clipped polygon.
- * Allocates new vertices and half-edges inside the DCEL.        */
+/*
+ * Rebuild a face's half-edge ring from a clipped polygon.
+ * Allocates new vertices and half-edges, appends them to the DCEL.
+ *
+ * NOTE: twin pointers are left NULL here. P3/P5 must re-stitch
+ * twin linkages across adjacent faces during integration.
+ */
 static void rebuild_face_ring(dcel_t *d, face_t *f,
                               const vec2_t *pts, int n)
 {
-    if (n < 3) return;  /* degenerate — skip */
+    if (n < 3) return;
 
     /* Allocate new vertices */
-    vertex_t **new_verts = (vertex_t **)malloc(n * sizeof(vertex_t *));
+    vertex_t **new_verts = (vertex_t **)malloc((size_t)n * sizeof(vertex_t *));
+    if (!new_verts) return;
     for (int i = 0; i < n; i++) {
         new_verts[i] = (vertex_t *)malloc(sizeof(vertex_t));
         new_verts[i]->x = pts[i].x;
@@ -155,12 +149,17 @@ static void rebuild_face_ring(dcel_t *d, face_t *f,
     }
 
     /* Allocate new half-edges for this face ring */
-    half_edge_t **new_edges = (half_edge_t **)malloc(n * sizeof(half_edge_t *));
+    half_edge_t **new_edges = (half_edge_t **)malloc((size_t)n * sizeof(half_edge_t *));
+    if (!new_edges) {
+        for (int i = 0; i < n; i++) free(new_verts[i]);
+        free(new_verts);
+        return;
+    }
     for (int i = 0; i < n; i++) {
         new_edges[i] = (half_edge_t *)malloc(sizeof(half_edge_t));
         new_edges[i]->origin      = new_verts[i];
         new_edges[i]->face        = f;
-        new_edges[i]->twin        = NULL;   /* twin linkage is cross-face — P3/P5 fix */
+        new_edges[i]->twin        = NULL;
         new_edges[i]->is_infinite = 0;
         new_verts[i]->incident_edge = new_edges[i];
     }
@@ -173,15 +172,13 @@ static void rebuild_face_ring(dcel_t *d, face_t *f,
 
     f->outer_edge = new_edges[0];
 
-    /* Append new vertices and edges to the DCEL arrays.
-     * We grow the arrays — a production implementation would use
-     * a more efficient allocator, but this is correct.          */
+    /* Grow DCEL arrays and append new elements */
     int old_nv = d->nv;
     int old_ne = d->ne;
     d->vertices = (vertex_t **)realloc(d->vertices,
-                      (old_nv + n) * sizeof(vertex_t *));
+                      (size_t)(old_nv + n) * sizeof(vertex_t *));
     d->edges    = (half_edge_t **)realloc(d->edges,
-                      (old_ne + n) * sizeof(half_edge_t *));
+                      (size_t)(old_ne + n) * sizeof(half_edge_t *));
     for (int i = 0; i < n; i++) {
         d->vertices[old_nv + i] = new_verts[i];
         d->edges[old_ne + i]    = new_edges[i];
@@ -193,16 +190,17 @@ static void rebuild_face_ring(dcel_t *d, face_t *f,
     free(new_edges);
 }
 
-/* Public API — appended to voronoi.h declarations */
+
+/* PUBLIC API */
 
 /*
- * clip_to_bbox — Sutherland-Hodgman clipping of all DCEL faces
+ * clip_to_bbox — Sutherland-Hodgman clipping of every DCEL face
  *
- * Clips every face in the DCEL to [xmin,ymin]×[xmax,ymax].
- * After this call every face is a closed bounded polygon with
- * all is_infinite flags cleared.
+ * Clips all faces to the axis-aligned rectangle [xmin,xmax] x [ymin,ymax].
+ * After this call every face is a closed bounded polygon and all
+ * is_infinite flags are cleared.
  *
- * Complexity: O(V) total where V = sum of vertices across all faces.
+ * Complexity: O(V_total) where V_total = sum of per-face vertex counts.
  */
 void clip_to_bbox(dcel_t *d, double xmin, double ymin,
                   double xmax, double ymax)
@@ -216,42 +214,36 @@ void clip_to_bbox(dcel_t *d, double xmin, double ymin,
         face_t *f = d->faces[fi];
         if (!f || !f->outer_edge) continue;
 
-        /* Collect current vertex ring */
         int n = collect_face_vertices(f, buf_a, MAX_CLIP_VERTS);
         if (n < 3) continue;
 
-        /* Clip against 4 edges sequentially: left, right, bottom, top */
+        /* Clip against 4 edges: left, right, bottom, top */
         vec2_t *src = buf_a;
         vec2_t *dst = buf_b;
 
         for (int edge = 0; edge < 4; edge++) {
             int new_n = clip_against_edge(src, n, dst, edge,
                                           xmin, ymin, xmax, ymax);
-            /* Swap buffers */
-            vec2_t *tmp = src;
-            src = dst;
-            dst = tmp;
+            vec2_t *tmp = src; src = dst; dst = tmp;
             n = new_n;
-            if (n < 3) break;   /* fully clipped away */
+            if (n < 3) break;
         }
 
         if (n < 3) continue;
 
-        /* Rebuild the face's half-edge ring from clipped polygon.
-         * src currently holds the final clipped vertices.       */
+        /* src now holds the final clipped polygon */
         rebuild_face_ring(d, f, src, n);
     }
 }
 
 /*
- * cell_area — Shoelace formula for a single face
+ * cell_area — Shoelace formula for a single Voronoi cell
  *
- * Walks the face's half-edge ring, collects vertices, and
- * computes the signed area via the Shoelace / surveyor formula.
- * Stores the result in face->area and returns it.
+ * Walks the face's half-edge ring, collects vertices, computes
+ * the area, stores it in face->area, and returns it.
  *
- * Units: square metres (input coords are metric Cartesian).
- * Complexity: O(v) where v = number of vertices of the cell.
+ * Units: square metres (coords are metric Cartesian from P2's projection).
+ * Complexity: O(v) where v = vertex count of the cell.
  */
 double cell_area(dcel_t *d, int face_id)
 {
@@ -259,11 +251,10 @@ double cell_area(dcel_t *d, int face_id)
 
     face_t *f = d->faces[face_id];
     if (!f || !f->outer_edge) {
-        f->area = 0.0;
+        if (f) f->area = 0.0;
         return 0.0;
     }
 
-    /* Collect vertices */
     vec2_t verts[MAX_CLIP_VERTS];
     int n = collect_face_vertices(f, verts, MAX_CLIP_VERTS);
     if (n < 3) {
@@ -271,7 +262,7 @@ double cell_area(dcel_t *d, int face_id)
         return 0.0;
     }
 
-    /* Shoelace: area = 0.5 * |Σ (x_i * y_{i+1} - x_{i+1} * y_i)| */
+    /* Shoelace: area = 0.5 * |sum_i (x_i * y_{i+1} - x_{i+1} * y_i)| */
     double sum = 0.0;
     for (int i = 0; i < n; i++) {
         int j = (i + 1) % n;
@@ -283,8 +274,8 @@ double cell_area(dcel_t *d, int face_id)
 }
 
 /*
- * compute_all_areas — convenience: populate face->area for every face.
- * Call after clip_to_bbox().
+ * compute_all_areas — populate face->area for every face in the DCEL.
+ * Call once after clip_to_bbox().
  */
 void compute_all_areas(dcel_t *d)
 {
@@ -294,7 +285,8 @@ void compute_all_areas(dcel_t *d)
     }
 }
 
-/* ---- Max-heap helpers for underserved ranking ---- */
+
+/* Max-heap helpers for underserved ranking */
 
 typedef struct {
     int    face_id;
@@ -325,14 +317,15 @@ static void build_max_heap_area(heap_entry_area_t *h, int n)
 }
 
 /*
- * flag_underserved — Identify and rank cells exceeding area threshold
+ * flag_underserved — Identify and rank cells exceeding the area threshold
  *
- * Sets face->is_underserved = 1 for every face whose area > threshold.
+ * For every face: if face->area > threshold, sets face->is_underserved = 1,
+ * otherwise sets it to 0.
+ *
  * Returns a malloc'd array of face IDs sorted largest-area-first
- * (heap-sort extraction order). Caller must free the array.
+ * (extracted via heap-sort from a max-heap). Caller must free().
  *
- * Complexity: O(n) to scan + O(m log m) to heap-sort underserved faces,
- *             where m = number of underserved faces.
+ * Complexity: O(n) scan + O(m log m) heap-sort, m = underserved count.
  */
 int *flag_underserved(dcel_t *d, double threshold, int *out_count)
 {
@@ -343,10 +336,10 @@ int *flag_underserved(dcel_t *d, double threshold, int *out_count)
 
     if (threshold <= 0.0) threshold = DEFAULT_THRESHOLD_SQ_M;
 
-    /* First pass: count and collect underserved faces */
-    int cap = d->nf;
+    /* First pass: collect underserved faces */
     heap_entry_area_t *heap = (heap_entry_area_t *)malloc(
-                                  cap * sizeof(heap_entry_area_t));
+                                  (size_t)d->nf * sizeof(heap_entry_area_t));
+    if (!heap) { *out_count = 0; return NULL; }
     int m = 0;
 
     for (int i = 0; i < d->nf; i++) {
@@ -369,13 +362,13 @@ int *flag_underserved(dcel_t *d, double threshold, int *out_count)
         return NULL;
     }
 
-    /* Build max-heap, then extract in descending order */
+    /* Build max-heap, then extract in descending order (heap-sort) */
     build_max_heap_area(heap, m);
 
-    int *result = (int *)malloc(m * sizeof(int));
+    int *result = (int *)malloc((size_t)m * sizeof(int));
     int size = m;
     for (int i = 0; i < m; i++) {
-        result[i] = heap[0].face_id;          /* extract max */
+        result[i] = heap[0].face_id;
         heap[0] = heap[size - 1];
         size--;
         if (size > 0) sift_down_area(heap, size, 0);
