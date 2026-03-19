@@ -1,0 +1,879 @@
+GeoDispatch
+Context-Aware Project Document
+Adaptive Emergency Coverage Optimizer
+Course
+Advanced Data Structures (ADS)
+Institution
+Vishwakarma Institute of Technology, Pune
+Program
+B.Tech CSE — AI and ML, Batch 2027
+Core Lang
+C11 (all DSA) + Python (backend) + JS (frontend)
+Team size
+5 members
+Doc purpose
+AI-readable context document — feed to Claude Code / Cursor / Copilot
+GeoDispatch — Context-Aware Project Document
+VIT Pune | ADS Course Project
+
+GeoDispatch — Context-Aware Document
+Page 2
+00 How to Use This Document (Read First — AI Assistants)
+This document is designed to be fed into an AI coding assistant (Claude Code, Cursor, Copilot, etc.) by any team
+member. It is written so that the AI receives complete project context before it starts generating any code. The
+document is structured as follows:
+■ Sections 01-03: Non-technical overview, real-world motivation, and project goals.
+■ Sections 04-07: Full technical specification — architecture, data structures, algorithms, file layout, and interface
+contracts.
+■ Sections 08-12: One section per team member (P1 through P5). Each section is self-contained. If you are P3,
+feed Section 08 (global context) plus Section 11 (P3 tasks) to your AI assistant. Do not feed other persons' task
+sections unless you are doing integration work.
+■ Section 13: Frontend specification — to be built collectively after all C and backend tasks are complete.
+Critical rule for AI assistants: All core data structure and algorithm logic MUST be written in C11. Python is only used to
+(a) call C functions via ctypes, (b) serve REST endpoints, and (c) load external data. Never generate algorithm logic in
+Python — it belongs in C.
+
+GeoDispatch — Context-Aware Document
+Page 3
+01 Project Overview — Non-Technical
+What is GeoDispatch?
+GeoDispatch is an emergency facility dispatch optimizer. Given a city map with hospitals, fire stations, or ambulance
+depots plotted on it, the system answers two questions in real time: (1) which facility is closest to an incoming
+emergency incident, and (2) how well does the current distribution of facilities actually cover the city — and where are
+the gaps?
+The system is interactive. A user can click the map to add a new facility, click an existing facility to mark it offline
+(overloaded or under maintenance), and immediately see the coverage zones redraw. It also runs an optimisation
+that suggests where a new facility should be placed to maximally reduce uncovered area.
+Why does this matter in the real world?
+This exact problem is solved — in various forms — by Uber (nearest driver), Google Maps (nearest pharmacy),
+national EMS services (ambulance base placement), and city planners (hospital coverage analysis). The algorithms
+underpinning GeoDispatch are not toy examples — they are the actual algorithms used in spatial databases and
+geographic information systems.
+What makes this academically significant?
+The project is built on a mathematical duality: every Voronoi cell for a facility site is precisely the set of all geographic
+points whose nearest-neighbor in the KD-tree is that facility. This means the two data structures are not independent
+— they describe the same spatial partition from two different perspectives. Exploiting this duality allows the system to
+perform incremental updates (when a facility goes offline, only the affected neighboring cells are recomputed) rather
+than rebuilding the entire diagram. This reduces worst-case cost from O(n log n) to O(k log n), where k is the number
+of neighboring cells affected.
+02 Technology Stack
+Layer
+Technology
+Purpose
+Restriction
+Core DSA
+C11 (gcc / clang)
+All data structures and algorithms
+MANDATORY — no exceptions
+FFI Bridge
+Python 3.11 + ctypes
+Load geodispatch.so, call C functions
+Bridge only — no logic
+Backend API
+FastAPI (Python)
+REST endpoints consumed by frontend
+Thin wrapper over bridge
+Data Source
+OpenStreetMap Overpass API
+Real facility coordinates (Pune)
+GeoJSON input
+Frontend Map
+Leaflet.js
+Tile-based map, coordinate rendering
+Free to use any version
+Frontend Viz
+D3.js v7
+Voronoi polygon drawing on map canvas
+Free to use any version
+Frontend Charts
+Chart.js v4
+Benchmark graphs
+Free to use any version
+Frontend FX
+GSAP 3, Three.js
+Animations and transitions
+Free to use any version
+Build
+GNU Make
+Compiles C → .o → .so
+Makefile provided by P5
+03 Repository File Structure
+Every team member must follow this structure exactly. Do not create files outside it.
+
+GeoDispatch — Context-Aware Document
+Page 4
+geodispatch/
+Makefile <-- P5 owns this
+geodispatch.h <-- P5 owns this (single public C API)
+src/
+kd.h <-- P1 owns (interface contract)
+kd.c <-- P1 owns
+kd_dynamic.c <-- P2 owns (extends kd.h)
+bench.c <-- P2 owns (standalone, links kd.o)
+voronoi.h <-- P3 owns (interface contract)
+voronoi.c <-- P3 owns (Fortune + DCEL)
+geometry.c <-- P4 owns (clips + areas + zones)
+algo.c <-- P5 owns (incremental update + Lloyd)
+test.c <-- P5 owns (unit tests, links all .o)
+python/
+geodispatch.py <-- P5 owns (ctypes bridge module)
+data_loader.py <-- P2 owns (Overpass OSM loader)
+state_manager.py <-- P4 owns (facility FSM)
+api.py <-- P4+P5 own (FastAPI app, split by endpoints)
+report.py <-- P5 owns (benchmark PDF generator)
+frontend/ <-- all 5 build together after C is done
+index.html
+css/ js/ assets/
+data/
+pune_facilities.json <-- output of data_loader.py
+benchmark_results.csv <-- output of bench.c
+04 Interface Contracts — What Each Person Exports
+These are the ONLY files other team members are allowed to read and link against. Never include another person's
+.c file directly — only their .h header and compiled .o object.
+P1 exports — kd.h
+typedef struct { double x; double y; int id; } point_t;
+typedef struct kdnode kdnode_t;
+kdnode_t* kd_build(point_t* pts, int n); // O(n log n)
+point_t kd_nearest(kdnode_t* root, point_t q); // O(log n) avg
+point_t* kd_knn(kdnode_t* root, point_t q, int k, int* out_count); // O(k log n)
+void kd_free(kdnode_t* root);
+P2 exports — additions to kd.h (same header, P2 appends)
+void kd_delete(kdnode_t* root, int point_id); // soft-delete, O(log n)
+void kd_insert(kdnode_t** root, point_t p); // online insert, amortised O(log n)
+void kd_rebalance(kdnode_t** root); // full rebuild, O(n log n)
+double kd_dead_ratio(kdnode_t* root); // returns dead/total
+P3 exports — voronoi.h
+typedef struct half_edge half_edge_t;
+typedef struct face face_t;
+typedef struct vertex vertex_t;
+typedef struct dcel dcel_t;
+
+GeoDispatch — Context-Aware Document
+Page 5
+dcel_t* voronoi_build(point_t* sites, int n); // Fortune sweep O(n log n)
+face_t** dcel_neighbours(dcel_t* d, int site_id, int* out_count); // O(deg)
+void voronoi_free(dcel_t* d);
+P4 exports — additions to voronoi.h
+void clip_to_bbox(dcel_t* d, double xmin, double ymin, double xmax, double ymax);
+double cell_area(dcel_t* d, int face_id); // Shoelace, O(v) per cell
+int* flag_underserved(dcel_t* d, double threshold, int* out_count); // returns face IDs
+P5 exports — geodispatch.h (the single public API)
+P5 writes geodispatch.h which re-exports every function above under a unified namespace, compiles everything into
+geodispatch.so, and writes the Python ctypes bridge. All Python code imports only from geodispatch.py — never from
+individual C headers.
+
+GeoDispatch — Context-Aware Document
+Page 6
+05 DSA Reference — Algorithms and Complexity
+Algorithm / Structure
+Owner
+Complexity
+Key idea
+KD-tree construction
+P1
+O(n log n) build
+Median-split on alternating axes; quickselect for exact median
+NN query (1-nearest)
+P1
+O(log n) avg
+Branch-and-bound; prune subtree if hypersphere cant improve best
+k-NN query
+P1
+O(k log n)
+Max-heap of size k; replace root when better candidate found
+Soft-delete + lazy rebuild
+P2
+O(log n) delete
+Flag node dead; rebuild when dead/total ratio exceeds threshold
+Online insert
+P2
+Amortised O(log n)
+Insert leaf; track imbalance score; rebuild if score exceeds limit
+Benchmarking harness
+P2
+O(n) baseline
+Measures KD-tree vs brute force vs incremental over n sweep
+Fortune sweep line
+P3
+O(n log n)
+Parabolic beach line + priority event queue; handles site+circle events
+DCEL (half-edge structure)
+P3
+O(1) neighbour
+Twin pointers; face->edge->twin->face gives O(1) adjacency
+Incremental site insert
+P3
+O(log n) amort
+Locate enclosing cell via KD-tree; local re-sweep that cell only
+Sutherland-Hodgman clip
+P4
+O(v) per polygon
+Clips infinite Voronoi edges to bounding box edge by edge
+Shoelace (cell area)
+P4
+O(v) per cell
+Sum of cross products of consecutive half-edge vertices
+Underserved zone detect
+P4
+O(n)
+Max-heap of cell areas; flag and rank cells exceeding threshold
+Incremental Voronoi update
+P5
+O(k log n)
+KD-tree finds affected neighbours; local Fortune re-sweep only those k cells
+Lloyds algorithm
+P5
+O(n) per iter
+Recompute centroid per cell; move site there; rebuild; repeat
+06 Data Pipeline — Pune OSM to C Structs
+Real facility data is pulled from OpenStreetMap using the Overpass API. The pipeline is: Overpass query ->
+GeoJSON -> Python list of dicts -> ctypes point_t array -> C engine.
+Overpass query for Pune hospitals:
+[out:json][timeout:25];
+area["name"="Pune"]->.searchArea;
+(node["amenity"="hospital"](area.searchArea);
+node["amenity"="fire_station"](area.searchArea););
+out body;
+P2's data_loader.py fetches this, parses each element into {id, lat, lon, name, type}, converts lat/lon to metric
+Cartesian coordinates (using a simple equirectangular projection centred on Pune), and stores the result in
+data/pune_facilities.json. The ctypes bridge (P5's geodispatch.py) reads this JSON and fills a C point_t array.
+07 Build System — Makefile (owned by P5)
+CC = gcc
+CFLAGS = -std=c11 -O2 -Wall -Wextra -fPIC -Isrc
+SRCS = src/kd.c src/kd_dynamic.c src/voronoi.c src/geometry.c src/algo.c
+OBJS = $(SRCS:.c=.o)
+all: geodispatch.so bench test
+geodispatch.so: $(OBJS)
+
+GeoDispatch — Context-Aware Document
+Page 7
+$(CC) -shared -o $@ $^
+bench: src/bench.c src/kd.o src/kd_dynamic.o
+$(CC) $(CFLAGS) -o bench $^ -lm
+test: src/test.c $(OBJS)
+$(CC) $(CFLAGS) -o test $^ -lm
+clean:
+rm -f $(OBJS) geodispatch.so bench test
+
+GeoDispatch — Context-Aware Document
+Page 8
+P
+1
+KD-Tree Indexing
+Viva story: "I built the spatial index that powers every single dispatch query in this system."
+P1 owns the foundational KD-tree module. Everything in this project — nearest-facility lookup, k-NN queries,
+incremental update neighbour detection — depends on P1's code being correct and fast. P1 writes kd.h and kd.c. P2
+will extend kd.h with dynamic operations in a separate file (kd_dynamic.c) without modifying P1's files. P1 must
+finalise the point_t and kdnode_t struct definitions first and share them with the team before anyone else writes C
+code.
+C
+Task 1 — KD-tree construction — kd_build()
+Objective: Build a static balanced KD-tree from an array of 2D points in O(n log n) time.
+Data structures to define in kd.h:
+typedef struct { double x; double y; int id; } point_t;
+typedef struct kdnode {
+point_t point;
+int axis; // 0 = split on x, 1 = split on y
+int deleted; // P2 will use this flag
+struct kdnode* left;
+struct kdnode* right;
+} kdnode_t;
+Implementation notes:
+■ Use a slab (pool) allocator: allocate n kdnode_t structs in one malloc call at the start of kd_build.
+Store a pointer to the slab in a global or passed-in context. This avoids n separate malloc calls.
+■ Partition using a two-pointer quickselect to find the median element in-place on the current subarray.
+Do NOT sort the full array — that would be O(n log^2 n). Quickselect gives O(n) expected per level.
+■ Alternate axis: depth % 2 == 0 splits on x, depth % 2 == 1 splits on y.
+■ The median element becomes the node. Left subtree receives indices [lo, mid-1], right receives
+[mid+1, hi].
+■ Set the deleted flag to 0 on every node during construction. P2 will set it to 1 during soft-delete.
+Function signature:
+kdnode_t* kd_build(point_t* pts, int n);
+Testing: build with 10 known points, print the tree with an in-order traversal, verify the split axes alternate correctly.
+
+GeoDispatch — Context-Aware Document
+Page 9
+C
+Task 2 — Nearest-neighbor query — kd_nearest()
+Objective: Given query point q, return the closest non-deleted point in the tree.
+Algorithm — branch-and-bound:
+■ Maintain best_dist (infinity initially) and best_node (NULL).
+■ At each node: if node is deleted, skip distance check but still recurse. Otherwise update best if
+dist(node, q) < best_dist.
+■ Determine which child subtree q falls into (near side). Recurse into near side first.
+■ After returning from near side: check if the far side hyperplane is within best_dist. If |q.axis -
+node.point.axis| < best_dist, recurse into far side too. Otherwise prune it.
+■ This pruning is the bounding hypersphere check — the key to O(log n) average performance.
+Function signature:
+point_t kd_nearest(kdnode_t* root, point_t q);
+Edge case: if all nodes are deleted, return a point_t with id = -1 as a sentinel.
+C
+Task 3 — k-NN query — kd_knn()
+Objective: Return the k closest non-deleted points to query q, sorted nearest-first.
+Data structure: max-heap of size k, implemented inline in C.
+■ Define a heap_entry_t struct: { double dist; point_t pt; }
+■ Maintain a fixed-size array heap[k] and an integer heap_size.
+■ heap_push: if heap_size < k, insert and sift up. If heap_size == k and new dist < heap[0].dist, replace
+root and sift down. Reject otherwise.
+■ After traversal, the heap contains the k nearest. Sort descending by distance before returning (since
+the heap is a max-heap, index 0 is the farthest of the k nearest — reverse it for the caller).
+■ Pruning: during tree traversal, only explore a subtree if its closest possible point is nearer than the
+current kth-nearest (heap[0].dist).
+Function signature:
+point_t* kd_knn(kdnode_t* root, point_t q, int k, int* out_count);
+Caller is responsible for freeing the returned array. out_count will be <= k (may be less if fewer than k non-deleted
+nodes exist).
+
+GeoDispatch — Context-Aware Document
+Page 10
+Python
+Task 4 — REST endpoint — /query-nearest and /query-knn
+Objective: Wire P1's C functions to the FastAPI app so the frontend can call them over HTTP.
+In python/api.py, P1 adds these two endpoint functions (P5 will integrate them into the app):
+@app.post('/query-nearest')
+def query_nearest(body: QueryRequest):
+# body has .lat and .lon
+q = to_cartesian(body.lat, body.lon)
+result = gd.kd_nearest(q) # calls C via geodispatch.py
+return {'facility': result}
+@app.post('/query-knn')
+def query_knn(body: KNNRequest):
+# body has .lat, .lon, .k
+q = to_cartesian(body.lat, body.lon)
+results = gd.kd_knn(q, body.k)
+return {'facilities': results}
+P1 must NOT write any C logic in Python. to_cartesian() is a coordinate helper in geodispatch.py (written by P5). P1
+just calls it.
+
+GeoDispatch — Context-Aware Document
+Page 11
+P
+2
+KD-Tree Dynamics and Empirical Analysis
+Viva story: "The textbook KD-tree is static. I made it dynamic and proved empirically why that matters."
+P2 extends P1's KD-tree with dynamic operations (delete, insert, rebalance) in a separate file kd_dynamic.c. P2
+never modifies kd.c or kd.h directly — they append new function declarations to kd.h at the bottom. P2 also owns the
+benchmarking harness (bench.c) and the OSM data loader (data_loader.py).
+C
+Task 1 — Soft-delete and dead-ratio tracking — kd_delete()
+Objective: Mark a point as deleted without restructuring the tree. Track how many nodes are dead.
+Implementation in kd_dynamic.c:
+■ Traverse the tree as in kd_nearest to locate the node with matching id.
+■ Set node->deleted = 1. Do NOT free the node or relink pointers.
+■ Maintain two global (or context) counters: dead_count and total_count. Increment dead_count on
+delete.
+■ kd_dead_ratio() returns (double)dead_count / total_count.
+■ kd_nearest() and kd_knn() (written by P1) already skip deleted nodes because they check the
+deleted flag before updating best.
+Function signatures:
+void kd_delete(kdnode_t* root, int point_id);
+double kd_dead_ratio(kdnode_t* root);
+Do not touch P1's kd.c. Only add to kd.h and write in kd_dynamic.c.
+C
+Task 2 — Lazy rebalance and online insert — kd_rebalance() and kd_insert()
+Objective: Support adding facilities at runtime and rebuilding the tree when it degrades.
+kd_insert():
+■ Traverse the tree following the same axis-split rules as construction.
+■ Insert as a new leaf node (allocate from the pool if space remains, else a single malloc).
+■ Increment total_count. After insert, check if dead_ratio > 0.30 or tree height exceeds 2*log2(n). If so,
+call kd_rebalance() automatically.
+kd_rebalance():
+■ Collect all non-deleted nodes into a flat array (in-order traversal).
+■ Free the old slab. Call kd_build() on the collected array. Replace the root pointer.
+■ Reset dead_count = 0. total_count = number of live nodes.
+Function signatures:
+void kd_insert(kdnode_t** root, point_t p);
+void kd_rebalance(kdnode_t** root);
+
+GeoDispatch — Context-Aware Document
+Page 12
+C
+Task 3 — Benchmarking harness — bench.c
+Objective: Produce a CSV of query times comparing your KD-tree against brute force, used by P5 to
+generate benchmark plots.
+bench.c is a standalone program (not linked into geodispatch.so):
+■ For n in {100, 500, 1000, 5000, 10000, 30000, 50000}: generate n random 2D points.
+■ Build KD-tree. Time 1000 random NN queries using clock_gettime(CLOCK_MONOTONIC). Record
+avg microseconds.
+■ Brute force: for same 1000 queries, do a linear scan over all n points. Record avg microseconds.
+■ Incremental: delete 10% of nodes, then time the same 1000 queries on the degraded tree.
+■ Write one CSV row per n: n, kd_avg_us, brute_avg_us, kd_degraded_avg_us.
+// CSV header:
+// n,kd_us,brute_us,kd_degraded_us
+Output file: data/benchmark_results.csv. This file is read by P5's report.py.
+Python
+Task 4 — OSM Overpass data loader — data_loader.py
+Objective: Pull real Pune facility data from OpenStreetMap and prepare it for the C engine.
+■ Use the requests library to POST the Overpass query to https://overpass-api.de/api/interpreter
+■ Parse the JSON response. For each node element, extract: id (OSM id), lat, lon, tags.name,
+tags.amenity.
+■ Convert lat/lon to metric Cartesian: use equirectangular projection centred at Pune (lat0=18.5204,
+lon0=73.8567). x = (lon - lon0) * cos(lat0*pi/180) * 111320.0, y = (lat - lat0) * 111320.0. Units are
+metres.
+■ Assign sequential integer ids starting from 0 (OSM ids are too large for our int id field).
+■ Write output to data/pune_facilities.json as a list of {id, x, y, name, type} objects.
+■ Also write a metadata file data/pune_meta.json with: total_count, bbox (xmin,ymin,xmax,ymax),
+source.
+No C or ctypes in this file. Pure Python. P5's geodispatch.py reads pune_facilities.json to populate the C engine.
+
+GeoDispatch — Context-Aware Document
+Page 13
+P
+3
+Voronoi Construction
+Viva story: "I implemented Fortune's algorithm — the theoretically optimal Voronoi construction — from
+scratch in C."
+P3 owns voronoi.h and voronoi.c. This is the most algorithmically demanding single module in the project. P3 does
+NOT depend on P1 or P2's C code during construction — Fortune's algorithm builds the diagram from raw point_t
+arrays, which uses only the point_t typedef from kd.h. P3 must include kd.h for that typedef only.
+C
+Task 1 — Fortune's sweep line algorithm — voronoi_build()
+Objective: Construct the complete Voronoi diagram of n sites in O(n log n) using Fortune's algorithm.
+Key data structures needed inside voronoi.c (not exposed in header):
+■ event_t: { double x; double y; int type; /* SITE or CIRCLE */ int site_id; arc_t* arc; }
+■ event_queue: a min-heap of event_t sorted by x (sweep line moves left to right).
+■ beach_line: a balanced BST (you can use a simple sorted linked list for correctness first, then
+optimise) of arc_t nodes, each representing a parabolic arc.
+■ arc_t: { int site_id; arc_t* prev; arc_t* next; event_t* circle_event; half_edge_t* edge; }
+Algorithm phases:
+■ Phase 1 — Initialise: insert all n site events into the priority queue (sorted by x-coordinate). Build the
+DCEL skeleton with one face per site.
+■ Phase 2 — Process events: while queue is not empty, pop the minimum-x event. If SITE event: find
+the arc directly above the new site on the beach line (binary search by y). Split that arc into three arcs.
+Create new half-edges in the DCEL. Check for new circle events involving the new arc's neighbours
+and add valid ones to queue. If CIRCLE event: remove the collapsing arc from the beach line. Finalise
+the Voronoi vertex in the DCEL. Add new circle events for the newly adjacent arcs.
+■ Phase 3 — Finalise: complete any remaining infinite edges by extending them to the bounding box
+(P4 will clip them properly with Sutherland-Hodgman, so P3 just needs to mark them as infinite).
+Function signature:
+dcel_t* voronoi_build(point_t* sites, int n);
+Start with a correct O(n^2) implementation if Fortune's is too complex initially. Correctness first, then optimise to O(n log
+n). The professor will ask about the algorithm, not necessarily the implementation details.
+
+GeoDispatch — Context-Aware Document
+Page 14
+C
+Task 2 — DCEL implementation — dcel.h structures
+Objective: Define and implement the Doubly Connected Edge List that stores the Voronoi output.
+Define these structs in voronoi.h:
+typedef struct vertex {
+double x, y;
+struct half_edge* incident_edge;
+} vertex_t;
+typedef struct half_edge {
+vertex_t* origin;
+struct half_edge* twin;
+struct half_edge* next;
+struct half_edge* prev;
+struct face* face;
+int is_infinite;
+} half_edge_t;
+typedef struct face {
+int site_id;
+half_edge_t* outer_edge;
+double area; // computed by P4
+int is_underserved; // set by P4
+} face_t;
+typedef struct dcel {
+vertex_t** vertices; int nv;
+half_edge_t** edges; int ne;
+face_t** faces; int nf;
+} dcel_t;
+dcel_neighbours() implementation:
+■ Given site_id, find its face. Walk the face's outer_edge ring using next pointers.
+■ For each half_edge encountered, follow twin->face to get the adjacent face.
+■ Collect unique adjacent face site_ids into a result array. Return it.
+face_t** dcel_neighbours(dcel_t* d, int site_id, int* out_count);
+
+GeoDispatch — Context-Aware Document
+Page 15
+C
+Task 3 — Incremental site insertion — voronoi_insert_site()
+Objective: Add a new facility to the existing Voronoi diagram without full rebuild.
+■ Locate which face the new site falls into by doing a point-in-polygon walk on the DCEL (start from any
+face, check if new site is inside using winding number, step to adjacent face via twin if not).
+■ That face is the one being split. Extract its boundary polygon.
+■ Run a local Fortune sweep considering only the new site and the boundary sites of that face plus its
+immediate DCEL neighbours.
+■ Update the DCEL: remove the split face, insert new faces and edges for the new site and the
+modified neighbours.
+Function signature:
+void voronoi_insert_site(dcel_t* d, point_t new_site);
+This function is used by P5's algo.c for the incremental update. P3 must ensure the DCEL remains valid (all twin
+pointers consistent) after insertion.
+Python
+Task 4 — Coverage map endpoint — /coverage-map
+Objective: Serialize the DCEL output to GeoJSON so the frontend D3 layer can draw it.
+■ In python/api.py, P3 adds the /coverage-map GET endpoint.
+■ Call gd.get_coverage_map() from geodispatch.py (P5 writes this bridge function).
+■ The bridge returns a Python list of dicts: [{site_id, polygon: [[x,y],...], area, is_underserved,
+facility_name}].
+■ Convert Cartesian coordinates back to lat/lon for GeoJSON (inverse of P2's projection).
+■ Return a GeoJSON FeatureCollection where each feature is a Voronoi polygon with facility
+properties.
+@app.get('/coverage-map')
+def coverage_map():
+cells = gd.get_coverage_map()
+return to_geojson_collection(cells) # helper in api.py
+The frontend fetches this endpoint on load and on every facility add/remove event.
+
+GeoDispatch — Context-Aware Document
+Page 16
+P
+4
+Voronoi Geometry and Zone Analysis
+Viva story: "I solved the geometry problems — how to bound, measure, and classify every Voronoi cell."
+P4 owns geometry.c, which links against voronoi.o and operates on the DCEL produced by P3. P4 never modifies
+voronoi.c or voronoi.h directly — they append their function declarations to voronoi.h at the bottom. P4 also owns
+state_manager.py and the /optimise endpoint.
+C
+Task 1 — Sutherland-Hodgman polygon clipping — clip_to_bbox()
+Objective: Fortune's algorithm produces infinite half-edges. Clip them to the bounding box of the dataset so
+every cell becomes a valid closed polygon.
+Algorithm — Sutherland-Hodgman:
+■ The clipping region is the bounding box: xmin, ymin, xmax, ymax (from P2's pune_meta.json,
+expanded by 10%).
+■ For each face in the DCEL: collect its vertex ring by walking the outer_edge chain.
+■ Apply Sutherland-Hodgman clipping against each of the 4 clip edges (left, right, bottom, top) in
+sequence.
+■ For each clip edge: iterate over output polygon from previous step. For each pair of consecutive
+vertices (A, B): if A inside and B inside: emit B. If A inside and B outside: emit intersection. If A outside
+and B inside: emit intersection then B. If both outside: emit nothing.
+■ Replace the face's half-edge ring in the DCEL with the clipped polygon vertices. Mark all edges as
+non-infinite.
+Function signature:
+void clip_to_bbox(dcel_t* d, double xmin, double ymin, double xmax, double ymax);
+After this function runs, all DCEL faces are closed bounded polygons. P4 calls this once after voronoi_build().
+C
+Task 2 — Cell area via Shoelace formula — cell_area()
+Objective: Compute the area of each Voronoi cell and store it on the face_t struct.
+Shoelace formula for a polygon with vertices (x0,y0)...(xn-1,yn-1):
+■ area = 0.5 * abs( sum over i of (x_i * y_{i+1} - x_{i+1} * y_i) ) where indices wrap around.
+■ Walk the face's half-edge ring using next pointers. At each half_edge, record its origin vertex (x, y).
+■ After collecting all vertices, apply the Shoelace formula.
+■ Store the result in face->area (the field is already defined in face_t by P3).
+■ Units are square metres (since P2's projection gives Cartesian coords in metres).
+Function signature:
+double cell_area(dcel_t* d, int face_id);
+Also write a loop that calls cell_area() for every face and populates all face->area fields. Call this after clip_to_bbox().
+
+GeoDispatch — Context-Aware Document
+Page 17
+C
+Task 3 — Underserved zone detection and priority ranking — flag_underserved()
+Objective: Identify cells whose area exceeds a threshold (facility is responsible for too large a zone) and
+rank them by severity.
+■ Threshold is configurable: #define DEFAULT_THRESHOLD_SQ_M 5000000.0 (5 km^2)
+■ For each face: if face->area > threshold, set face->is_underserved = 1.
+■ Build a max-heap of underserved faces keyed on area. This gives the ranked list of worst zones.
+■ Return an array of face_id (int) sorted largest-area-first. out_count is the number of underserved
+faces.
+Function signature:
+int* flag_underserved(dcel_t* d, double threshold, int* out_count);
+This result is used by the frontend to highlight zones in red and by the optimise endpoint to decide where Lloyd's
+iterations should prioritise new facility placement.
+Python
+Task 4 — Facility state manager + /optimise endpoint — state_manager.py and api.py
+Objective: Maintain a live record of which facilities are online/offline/overloaded and expose the /optimise
+endpoint.
+state_manager.py:
+■ Maintains a Python dict: facility_states = {id: 'online' | 'offline' | 'overloaded'}.
+■ When a facility transitions to offline/overloaded, calls gd.kd_delete(id) and
+gd.voronoi_incremental_update() via the bridge.
+■ When a facility comes back online, calls gd.kd_insert(point) and gd.voronoi_insert_site(point).
+■ Exposes get_live_facilities() returning only online facility IDs.
+/optimise endpoint in api.py:
+@app.post('/optimise')
+def optimise(body: OptimiseRequest):
+# body.iterations: how many Lloyd steps to run
+steps = gd.run_lloyds(body.iterations)
+# steps is a list of {step_num, facility_movements: [{id, from, to}]}
+return {'steps': steps, 'recommendation': steps[-1]['facility_movements']}
+P4 writes the endpoint logic. P5's geodispatch.py provides gd.run_lloyds().
+
+GeoDispatch — Context-Aware Document
+Page 18
+P
+5
+Duality Algorithms and System Integration
+Viva story: "I own the core insight — the Voronoi-KD-tree duality — and every algorithm that exploits it."
+P5 is the integrator. They own the two highest-level algorithms (incremental update and Lloyd's), the shared library
+build, the ctypes bridge (the single Python interface to all C code), and the mutation endpoints. P5's tasks cannot start
+until P1, P2, P3, and P4 have exported their .h files and at least stub implementations of their functions.
+C
+Task 1 — Incremental Voronoi update — voronoi_incremental_update() in algo.c
+Objective: When a facility changes state, update only the affected Voronoi cells rather than rebuilding the
+entire diagram. This is the O(k log n) algorithm that is the project's research contribution.
+This function is the embodiment of the KD-tree / Voronoi duality.
+■ Step 1: Given the site_id of the changed facility, call dcel_neighbours(d, site_id, &k;) to get its k
+adjacent faces. This uses the DCEL — O(k) where k is the cell degree (typically 5-7 for Voronoi
+diagrams).
+■ Step 2: For each of those k neighbour face site_ids, call kd_knn(root, neighbour_site, k+2) to find the
+nearby facilities that might now be the nearest neighbour of points in that zone. This uses the KD-tree
+— O(k log n).
+■ Step 3: Collect the union of the changed site, its neighbours, and the KD-tree candidates. Run
+voronoi_build() on this local subset only (typically 10-15 sites). Splice the result back into the main
+DCEL.
+■ Step 4: Recompute cell_area() and flag_underserved() for only the affected faces.
+Function signature:
+void voronoi_incremental_update(dcel_t* d, kdnode_t* kd_root, int changed_site_id);
+Benchmark this: log the number of affected cells k and the wall-clock time. Compare against a full voronoi_build() call.
+This is the data that proves O(k log n) empirically.
+
+GeoDispatch — Context-Aware Document
+Page 19
+C
+Task 2 — Lloyd's algorithm — run_lloyds() in algo.c
+Objective: Iteratively move each facility to the centroid of its Voronoi cell to minimise maximum coverage
+distance. This is the facility placement optimiser.
+■ For each iteration up to max_iterations:
+■ For each face in the DCEL: walk the half-edge ring to collect vertices. Compute centroid: cx = mean
+of vertex x-coords, cy = mean of vertex y-coords.
+■ Compute movement delta: sqrt((new_cx - old_x)^2 + (new_cy - old_y)^2). Accumulate total
+movement across all facilities.
+■ Move the facility: update the point_t in the KD-tree (soft-delete old, insert new). Call voronoi_build()
+on the full updated set (Lloyd's always does full rebuilds).
+■ If total_movement < convergence_threshold (e.g. 50.0 metres), break.
+■ Record each iteration's state: for each facility, {id, from: {x,y}, to: {x,y}}.
+Function signature:
+lloyds_result_t* run_lloyds(dcel_t** d, kdnode_t** kd_root,
+point_t* sites, int n,
+int max_iterations, double threshold);
+// lloyds_result_t: { int iterations_run; facility_move_t* moves; int nmoves; }
+C +
+Make
+Task 3 — Shared library, unit tests, and Makefile — geodispatch.so, test.c, Makefile
+Objective: Compile all .o files into geodispatch.so and write a comprehensive unit test suite.
+geodispatch.h — the unified public header:
+■ Include kd.h and voronoi.h. Declare any additional symbols from algo.c.
+■ This is the ONLY header that Python's ctypes bridge will reference.
+test.c — assert-based unit tests:
+■ Test kd_build with 5 known points. Call kd_nearest with a query whose answer is known. Assert.
+■ Test kd_delete: delete the nearest point. Verify kd_nearest now returns the second nearest.
+■ Test kd_knn: verify the returned array is sorted by distance.
+■ Test voronoi_build with 4 points at corners of a square. Verify 4 faces in DCEL, all with correct
+neighbours.
+■ Test cell_area for the square case: each cell should be exactly 1/4 of the bounding box area.
+■ Test incremental_update: build, delete one site, call update, verify the DCEL is still valid.
+Makefile:
+■ Targets: all (builds .so), bench (builds bench executable), test (builds and runs test), clean.
+■ Use -fPIC for all object files that go into the .so.
+■ -lm is required for math.h functions (sqrt, fabs, cos, etc.).
+
+GeoDispatch — Context-Aware Document
+Page 20
+Python
+Task 4 — ctypes bridge, mutation endpoints, benchmark report — geodispatch.py,
+api.py, report.py
+Objective: Expose the entire C engine to Python and close the API surface.
+geodispatch.py — ctypes bridge:
+■ import ctypes; lib = ctypes.CDLL('./geodispatch.so')
+■ For each exported C function: set lib.function_name.argtypes and lib.function_name.restype.
+■ Define Python-friendly wrappers: kd_nearest(lat, lon) -> dict, kd_knn(lat, lon, k) -> list, etc.
+■ On module load: read data/pune_facilities.json, populate a ctypes point_t array, call kd_build() and
+voronoi_build(). Store root and dcel as module-level globals.
+/add-facility and /remove-facility in api.py:
+@app.post('/add-facility')
+def add_facility(body: FacilityRequest):
+# body: lat, lon, name, type
+gd.kd_insert(body.lat, body.lon)
+gd.voronoi_insert_site(body.lat, body.lon)
+state_manager.set_state(new_id, 'online')
+return {'status': 'ok', 'id': new_id}
+@app.delete('/remove-facility/{facility_id}')
+def remove_facility(facility_id: int):
+gd.kd_delete(facility_id)
+gd.voronoi_incremental_update(facility_id)
+state_manager.set_state(facility_id, 'offline')
+return {'status': 'ok'}
+report.py — benchmark report generator:
+■ Read data/benchmark_results.csv produced by bench.
+■ Use matplotlib to generate three log-log plots: (1) KD-tree vs brute force query time, (2) KD-tree
+degraded vs normal, (3) incremental update vs full rebuild as a function of k.
+■ Export to data/benchmark_report.pdf.
+
+GeoDispatch — Context-Aware Document
+Page 21
+13 Frontend Specification — Built Collectively After All C Tasks Complete
+The frontend is built by all five team members together once the REST API is running. No individual owns it. The
+design goal is a cinematic, high-fidelity spatial interface that feels nothing like a student project — it should look and
+feel like a professional operations dashboard that could be deployed by an actual emergency services authority.
+13.1 Visual Identity
+The palette is deep space: near-black backgrounds (#0D0D1A), electric indigo accents (#6C63FF), signal teal
+(#00E5CC), alert coral (#FF5C5C), and pure white text (#F0F0FF). Typography is a single variable font — Inter
+Variable — set at multiple optical sizes. All interactive elements have a 2px glow on hover in the accent colour. The
+aesthetic is between a military command centre and a high-end data journalism piece — precise, purposeful, and
+arresting.
+13.2 Layout Structure
+The layout is a full-bleed single page with three layers stacked by z-index:
+■ Layer 0 (z=0): The Three.js particle field — 4000 slow-drifting white particles on the deep background, visible in
+the left panel and the top header area. Not on the map — only in UI chrome.
+■ Layer 1 (z=1): The Leaflet map fills the right 65% of the viewport, edge to edge, no border, no padding. The map
+tiles are a custom dark style (CartoDB Dark Matter or Stadia Alidade Smooth Dark) so our D3 overlays pop.
+■ Layer 2 (z=2): The D3 SVG overlay is positioned absolutely on top of the Leaflet map, synced to the map's
+coordinate system. Voronoi polygons, facility markers, and connection lines all live here.
+■ Layer 3 (z=3): The glass-morphism left panel (35% width) — blurred backdrop, border 1px
+rgba(108,99,255,0.3), stats cards, controls, search.
+■ Layer 4 (z=4): Toast notifications, modal overlays, and loading screens.
+13.3 The Map and Voronoi Layer — D3.js
+The Voronoi polygons are drawn as SVG paths synced to the Leaflet map projection. When the map pans or zooms,
+the D3 overlay recomputes the projected coordinates using Leaflet's latLngToLayerPoint() and redraws. The visual
+treatment of the cells:
+■ Resting state: fill is a radial gradient from the facility's accent colour at 8% opacity at the centroid to transparent
+at the cell edges. Stroke is the accent colour at 40% opacity, 0.8px weight. The result is a glowing membrane
+effect — cells breathe with a slow CSS pulse animation (opacity oscillates between 0.3 and 0.6 on a 3-second
+ease-in-out loop, staggered per cell using cell index * 0.15s delay).
+■ Underserved cells: stroke switches to coral (#FF5C5C), weight increases to 2px. The fill gradient shifts to coral.
+A subtle scanline pattern (repeating linear gradient of 1px transparent / 3px rgba(255,92,92,0.05)) overlays the fill.
+The cell pulses faster — 1.2 second loop.
+■ Hover state: GSAP animates the hovered cell's stroke-width from 0.8 to 2.5px and opacity from 0.4 to 0.9 over
+180ms ease-out. All neighbouring cells dim to 20% opacity simultaneously (GSAP timeline). A tooltip card appears
+at cursor position.
+■ Active (clicked) state: The cell expands by 3% scale (CSS transform on the SVG path) with a 250ms spring
+ease. The left panel slides to show that facility's detail view.
+
+GeoDispatch — Context-Aware Document
+Page 22
+13.4 Facility Markers
+Each facility is a custom Leaflet marker — not the default pin. The marker is an SVG circle: 12px radius, filled with the
+facility type colour (hospitals: teal, fire stations: amber, ambulances: coral), white border 2px, with a glow filter applied
+(feGaussianBlur stdDeviation=3, feComposite to create the bloom). On hover the radius animates to 18px over
+150ms. Offline facilities show a grey fill with a pulsing red ring (stroke-dasharray animation simulating a radar sweep,
+1.5s loop). A connecting line (SVG polyline, stroke-dasharray animated to march) draws from each facility marker to
+its cell centroid on hover.
+13.5 Left Panel — Glass Morphism Control Surface
+The left panel (35vw, full height, position: fixed left 0) has: background rgba(13,13,26,0.75), backdrop-filter blur(24px)
+saturate(1.5), border-right 1px solid rgba(108,99,255,0.2). It is divided into four scrollable sections separated by thin
+glowing dividers:
+Section A — Header:
+■ GeoDispatch logotype in 28px Inter 700, letter-spacing -0.02em, gradient fill (left: #6C63FF, right: #00E5CC)
+using SVG linearGradient on the text.
+■ Subtitle: 'Emergency Coverage Optimizer — Pune' in 11px Inter 400, color #8080A0.
+■ A real-time clock (city time, updated every second) in monospace, top-right of header.
+■ Three.js particle canvas fills the header background — particles drift upward slowly.
+Section B — Live Stats Cards (2x2 grid):
+■ Total facilities online: large number (Inter 700, 36px, teal). Updates on state change with a countUp animation
+(counts from old value to new over 600ms).
+■ Underserved zones: number in coral. Same countUp animation.
+■ Avg response radius: computed from mean cell area (sqrt(area/pi)), formatted in km, two decimal places.
+■ Coverage efficiency: ratio of served area to total bounding box area, shown as percentage.
+■ Each card has a micro-sparkline (10-point history, updated on each state change) drawn as an SVG polyline
+using D3 with a smooth curve interpolation.
+Section C — Facility List:
+■ Virtualized list (only renders visible rows) of all facilities. Each row: type icon (SVG), name, status badge
+(online/offline/overloaded), area of its zone.
+■ Clicking a row flies the map to that facility (Leaflet flyTo with 1.5s smooth animation), highlights its cell, and
+expands a detail drawer below the row.
+■ Detail drawer (GSAP slideDown, 300ms) shows: zone area in km^2, k nearest neighbours listed, status toggle
+buttons (online / offline / overloaded), and a mini D3 bar chart of that facility's zone area vs the city average.
+■ Search bar at top of list: filters by name with debounced input (250ms). Non-matching facilities animate to
+opacity 0.2 (GSAP, 200ms stagger).
+Section D — Actions and Mode Switcher:
+■ Mode toggle: three pill buttons — QUERY, EDIT, OPTIMISE. Active pill slides with a sliding background using
+GSAP. Inactive pills fade to 40% opacity.
+■ QUERY mode: clicking the map shows a pulsing crosshair marker and fires /query-nearest. A result card slides
+up from the bottom (GSAP fromY: 60px, opacity: 0 to 1, 400ms spring). The result card shows facility name,
+distance in metres, estimated response time, and a D3 arc gauge showing coverage score.
+
+GeoDispatch — Context-Aware Document
+Page 23
+■ EDIT mode: clicking the map adds a new facility (custom placement modal slides in, user enters name and
+type). On confirm, a loading shimmer plays on the Voronoi layer while the API responds, then the new cell draws
+in with a radial wipe animation (clip-path circle expanding from the new facility point, 600ms GSAP).
+■ OPTIMISE mode: shows an iteration count input and a RUN button. On run, each Lloyd iteration plays as a
+sequential animation: facility markers slide to their new positions along a bezier path, then the Voronoi layer
+redraws with a fade-crossfade (old cells fade out at 0.3 opacity, new cells fade in, 400ms overlap, creating a
+smooth morph feel). After all iterations, a summary card shows which facilities moved the most and a
+recommended placement for a hypothetical new facility shown as a glowing ghost marker.
+13.6 Loading Experience
+On initial page load, a full-screen loading overlay covers everything: deep background, the GeoDispatch logotype
+centred, and a custom animated loader below it. The loader is a Three.js scene of two interlocking rings (Voronoi
+diagram visual metaphor) rotating in opposite directions with a particle trail. Below the loader: sequential status
+messages that type out one by one (typed.js or custom typewriter): 'Loading Pune facility data...', 'Building KD-tree
+index...', 'Computing Voronoi coverage...', 'Ready.' Each message fades in as the corresponding API call completes.
+When all data is ready, the overlay splits down the middle (clip-path animation, two halves slide left and right, 600ms
+cubic-bezier ease-in) revealing the map underneath.
+13.7 Benchmark Dashboard — Separate View
+A floating button (bottom-right, glass pill, 'View Benchmarks') opens a full-screen modal. The modal slides up from the
+bottom (GSAP y: 100vh to 0, 500ms expo ease). Inside: three Chart.js charts side by side on a dark background.
+Chart 1: log-log scatter of KD-tree vs brute force query time vs n, with smooth line interpolation and an animated
+draw-in (chartjs animation duration 1200ms, easing easeInOutQuart). Chart 2: bar chart of incremental update time
+vs full rebuild time as bars side by side for various k values. Bars animate in sequentially (stagger 80ms per bar).
+Chart 3: line chart of Lloyd's convergence — total movement per iteration, with a horizontal dashed threshold line
+showing the convergence cutoff. All charts use the project palette: teal lines on near-black background, coral for the
+brute force baseline. Hovering any data point shows a detailed tooltip with the exact values and the speedup ratio.
+13.8 Micro-interactions and Polish
+■ Every button has a press feedback: scale(0.96) on mousedown, back to scale(1) on mouseup, 80ms.
+■ Toast notifications slide in from the top-right (GSAP fromX: 20px, opacity: 0 to 1, 350ms) and auto-dismiss after
+4 seconds with a progress bar draining in the toast background.
+■ The map's Voronoi layer has a data-freshness indicator: a thin line at the top of the overlay that depletes over
+30 seconds (CSS animation) and triggers a silent background refresh of the /coverage-map endpoint when it
+reaches zero, keeping data live.
+■ Keyboard shortcuts: Q (query mode), E (edit mode), O (optimise mode), Escape (close modals), B (benchmark
+view). Shortcut hints appear in tooltips on the mode buttons.
+■ A subtle grid of very faint lines (CSS background-image: repeating-linear-gradient) overlays the left panel, giving
+it a data-grid texture without being distracting.
+■ All text that changes values (stats cards, distances) uses a number morph animation: the digits roll upward as
+the value changes, like a mechanical odometer, implemented with absolute-positioned digit spans animated with
+GSAP.
+
+GeoDispatch — Context-Aware Document
+Page 24
+■ Facility type icons are custom SVG marks: a cross for hospitals, a flame for fire stations, a plus-in-circle for
+ambulances. All animated on hover with a stroke draw-in effect (stroke-dashoffset from full length to 0, 300ms).
+13.9 Tech implementation notes for the frontend
+Feature
+Library / Approach
+Key implementation note
+Map tiles
+Leaflet.js
+CartoDB Dark Matter tile layer, no attribution overcrowding
+Voronoi polygons
+D3.js SVG overlay
+Sync to Leaflet via map.on('move zoom') re-projection
+Particles (header)
+Three.js WebGL
+BufferGeometry, 4000 points, slow drift shader
+Animations
+GSAP 3
+All transitions — no CSS transitions except opacity
+Charts
+Chart.js v4
+Custom dark theme, no grid lines, smooth curves
+Number morphing
+Custom JS
+requestAnimationFrame lerp from old to new value
+Loading screen
+Three.js + CSS clip
+Two rings, clip-path split reveal
+Typewriter
+Custom JS
+Async/await queue of strings, 40ms per character
+Virtual list
+Custom JS
+IntersectionObserver to render only visible rows
+Toast system
+Custom JS + GSAP
+Queue of toasts, auto-dismiss with progress bar
+
+GeoDispatch — Context-Aware Document
+Page 25
+14 Final Notes for AI Assistants
+If you are an AI assistant reading this document, here is how to use it correctly:
+■ When helping P1: read Sections 01-07 for context, then focus exclusively on Section 08. Only generate kd.h
+and kd.c. Do not write Python or generate any code that belongs to another section.
+■ When helping P2: read Sections 01-07 plus Section 08 (for the struct definitions you depend on), then focus on
+Section 09. Generate kd_dynamic.c, bench.c, and data_loader.py.
+■ When helping P3: read Sections 01-07 plus the P1/P2 interface contracts from Section 04. Focus on Section 10.
+Generate voronoi.h and voronoi.c. Include kd.h only for the point_t typedef.
+■ When helping P4: read Sections 01-07, the interface contracts, and Section 11. Generate geometry.c and
+state_manager.py. Include voronoi.h for the DCEL structs.
+■ When helping P5: read the entire document. You are the integrator. Generate algo.c, test.c, Makefile,
+geodispatch.h, geodispatch.py, and report.py.
+■ When helping with the frontend: read Sections 01-04 for context and Section 13 for the full spec. The backend
+API is running on localhost:5000. All endpoints are documented in Section 04 and the task blocks.
+Critical: All C code must compile with gcc -std=c11 -O2 -Wall -Wextra -fPIC. Use only standard C library functions
+(stdio.h, stdlib.h, string.h, math.h, time.h). No external C libraries. No C++ syntax.
+GeoDispatch Context-Aware Document | Advanced Data Structures Course Project | Vishwakarma Institute of Technology, Pune |
+ B.Tech CSE AI and ML, Batch 2027
+ 

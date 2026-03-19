@@ -62,7 +62,7 @@ _root = ctypes.c_void_p(None)
 _meta = {}  # id -> {name, type, lat, lon}
 
 def _load():
-    global _root
+    global _root, _facilities_arr, _facilities_n
     if not DATA_FILE.exists():
         raise FileNotFoundError(f"{DATA_FILE} not found. Run: python python/data_loader.py")
 
@@ -75,10 +75,15 @@ def _load():
         _meta[f["id"]] = {"name": f.get("name", ""), "type": f.get("type", ""),
                           "lat": f["lat"], "lon": f["lon"]}
 
+    _facilities_arr = arr
+    _facilities_n = n
     _root = ctypes.c_void_p(lib.kd_build(arr, ctypes.c_int(n)))
+    # init_dcel() is called here now:
+    try:
+        init_dcel()
+    except Exception as e:
+        print(f"[geodispatch] warning: init_dcel failed: {e}", file=sys.stderr)
     print(f"[geodispatch] {n} facilities loaded.", file=sys.stderr)
-
-_load()
 
 def _enrich(pt):
     info = _meta.get(pt.id, {})
@@ -116,3 +121,105 @@ def kd_rebalance():
 
 def kd_dead_ratio():
     return float(lib.kd_dead_ratio(_root))
+
+# --- P5 Integration ---
+class FacilityMoveT(ctypes.Structure):
+    _fields_ = [("site_id", ctypes.c_int), ("from_pt", PointT), ("to_pt", PointT)]
+
+class LloydsResultT(ctypes.Structure):
+    _fields_ = [("iterations_run", ctypes.c_int), ("moves", ctypes.POINTER(FacilityMoveT)), ("nmoves", ctypes.c_int)]
+
+class CoverageCellT(ctypes.Structure):
+    _fields_ = [("site_id", ctypes.c_int), ("area", ctypes.c_double), ("is_underserved", ctypes.c_int), 
+                ("polygon_coords", ctypes.POINTER(ctypes.c_double)), ("num_points", ctypes.c_int)]
+
+class CoverageMapT(ctypes.Structure):
+    _fields_ = [("cells", ctypes.POINTER(CoverageCellT)), ("ncells", ctypes.c_int)]
+
+lib.voronoi_build.argtypes = [ctypes.POINTER(PointT), ctypes.c_int]
+lib.voronoi_build.restype  = ctypes.c_void_p
+lib.voronoi_free.argtypes  = [ctypes.c_void_p]
+lib.voronoi_free.restype   = None
+lib.voronoi_incremental_update.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
+lib.voronoi_incremental_update.restype  = None
+lib.run_lloyds.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(PointT), ctypes.c_int, ctypes.c_int, ctypes.c_double]
+lib.run_lloyds.restype = ctypes.POINTER(LloydsResultT)
+lib.free_lloyds_result.argtypes = [ctypes.POINTER(LloydsResultT)]
+lib.free_lloyds_result.restype = None
+lib.get_coverage_map.argtypes = [ctypes.c_void_p]
+lib.get_coverage_map.restype = ctypes.POINTER(CoverageMapT)
+lib.free_coverage_map.argtypes = [ctypes.POINTER(CoverageMapT)]
+lib.free_coverage_map.restype = None
+lib.voronoi_insert_site.argtypes = [ctypes.c_void_p, PointT]
+lib.voronoi_insert_site.restype = None
+
+_dcel = ctypes.c_void_p(None)
+_facilities_arr = None
+_facilities_n = 0
+
+def init_dcel():
+    global _dcel
+    if _dcel: lib.voronoi_free(_dcel)
+    _dcel = ctypes.c_void_p(lib.voronoi_build(_facilities_arr, _facilities_n))
+
+def voronoi_incremental_update(facility_id):
+    if _dcel and _root:
+        lib.voronoi_incremental_update(_dcel, _root, ctypes.c_int(facility_id))
+
+def voronoi_insert_site(facility):
+    if not _dcel: return
+    x, y = _to_xy(float(facility.get("lat", 0)), float(facility.get("lon", 0)))
+    if "x" in facility: x = float(facility["x"])
+    if "y" in facility: y = float(facility["y"])
+    lib.voronoi_insert_site(_dcel, PointT(x, y, int(facility["id"])))
+
+def run_lloyds(iterations, convergence_threshold):
+    global _root, _dcel
+    if not _dcel or not _root or not _facilities_arr: return []
+    res_ptr = lib.run_lloyds(ctypes.byref(_dcel), ctypes.byref(_root), _facilities_arr, _facilities_n, ctypes.c_int(iterations), ctypes.c_double(convergence_threshold))
+    if not res_ptr: return []
+    
+    res = res_ptr.contents
+    steps = []
+    # group moves by iterations_run (simulated flat array in C snippet)
+    # Actually the C snippet doesn't separate iterations in the output structure easily, 
+    # it just outputs sequentially. We'll dump all moves into the first step for simplicity 
+    # since we want to return what FastApi expects.
+    moves = []
+    for i in range(res.nmoves):
+        m = res.moves[i]
+        moves.append({
+            "id": m.site_id,
+            "from": {"x": m.from_pt.x, "y": m.from_pt.y},
+            "to": {"x": m.to_pt.x, "y": m.to_pt.y}
+        })
+    steps.append({"step_num": 1, "facility_movements": moves})
+    
+    lib.free_lloyds_result(res_ptr)
+    return steps
+
+def get_coverage_map():
+    if not _dcel: return []
+    map_ptr = lib.get_coverage_map(_dcel)
+    if not map_ptr: return []
+    
+    c_map = map_ptr.contents
+    cells = []
+    for i in range(c_map.ncells):
+        c = c_map.cells[i]
+        coords = []
+        for j in range(c.num_points):
+            coords.append([c.polygon_coords[j*2], c.polygon_coords[j*2+1]])
+        info = _meta.get(c.site_id, {})
+        cells.append({
+            "site_id": c.site_id,
+            "area": c.area,
+            "is_underserved": c.is_underserved,
+            "polygon": coords,
+            "facility_name": info.get("name", f"Facility {c.site_id}")
+        })
+        
+    lib.free_coverage_map(map_ptr)
+    return cells
+
+_load()

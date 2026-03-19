@@ -10,7 +10,7 @@
 # so that geodispatch.py can find it via ctypes at import time.
 
 CC     = gcc
-CFLAGS = -std=c11 -O2 -Wall -Wextra -fPIC
+CFLAGS = -std=c11 -O2 -Wall -Wextra -fPIC -I. -Isrc
 
 # ── detect OS for shared library extension ────────────────────────────────────
 UNAME_S := $(shell uname -s 2>/dev/null)
@@ -29,7 +29,7 @@ else
 endif
 
 # ── sources ───────────────────────────────────────────────────────────────────
-LIB_SRC = src/kd.c src/kd_dynamic.c
+LIB_SRC = src/kd.c src/kd_dynamic.c src/voronoi.c src/geometry.c src/algo.c
 
 # ── output paths ──────────────────────────────────────────────────────────────
 SO      = python/geodispatch.$(SO_EXT)

@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "kd.h"
+#include "voronoi.h"
 
 static int passed = 0, failed = 0;
 
@@ -129,6 +130,16 @@ static void test_rebalance(void)
     kd_delete(all_dead, 2); kd_delete(all_dead, 3);
     kd_rebalance(&all_dead);
     check(all_dead == NULL, "rebalancing all-deleted tree yields NULL");
+
+    // ── Task 4 test: voronoi_build ──
+    dcel_t *dcel = voronoi_build(pts, 4);
+    printf("voronoi_build output: %d vertices, %d edges, %d faces\n", dcel->nv, dcel->ne, dcel->nf);
+    
+    int nbr_count = 0;
+    face_t** nbrs = dcel_neighbours(dcel, 0, &nbr_count);
+    printf("dcel_neighbours for site 0: %d neighbours\n", nbr_count);
+    free(nbrs);
+    voronoi_free(dcel);
 
     kd_free(root);
 }

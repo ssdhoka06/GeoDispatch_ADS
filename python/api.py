@@ -2,6 +2,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import geodispatch as gd
+import state_manager
+import math
 
 app = FastAPI(title="GeoDispatch", version="1.0.0")
 
@@ -12,8 +14,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# Shared request/response models
+# ── Models ────────────────────────────────────────────────────
 
 class QueryRequest(BaseModel):
     lat: float
@@ -25,18 +26,14 @@ class KNNRequest(BaseModel):
     k: int = 3
 
 class OptimiseRequest(BaseModel):
-    iterations: int = Field(default=10, ge=1, le=200,
-                            description="Number of Lloyd's iterations to run")
-    convergence_threshold: float = Field(
-        default=50.0, ge=0.1,
-        description="Stop early if total movement < threshold (metres)")
+    iterations: int = Field(default=10, ge=1, le=200)
+    convergence_threshold: float = Field(default=50.0, ge=0.1)
 
 class SetStateRequest(BaseModel):
     facility_id: int
-    new_state: str = Field(
-        ..., pattern="^(online|offline|overloaded)$",
-        description="Target state: online | offline | overloaded")
+    new_state: str = Field(..., pattern="^(online|offline|overloaded)$")
 
+# ── P1 — Ragini ───────────────────────────────────────────────
 
 @app.post("/query-nearest")
 def query_nearest(body: QueryRequest):
@@ -51,9 +48,7 @@ def query_knn(body: KNNRequest):
     results = gd.kd_knn(body.lat, body.lon, body.k)
     return {"k": body.k, "facilities": results}
 
-# Lazy import: state_manager can work without geodispatch.so loaded
-import state_manager
-
+# ── P2 — Nikhil ───────────────────────────────────────────────
 
 @app.post("/optimise")
 def optimise(body: OptimiseRequest):
@@ -105,3 +100,32 @@ def live_facilities():
     return {"ids": state_manager.get_live_facilities()}
 
 
+# ── P3 — Shakti / P5 — Sanat ───────────────────────────────────
+
+@app.get('/coverage-map')
+def coverage_map():
+    cells = gd.get_coverage_map() if hasattr(gd, 'get_coverage_map') else []
+    features = []
+    for cell in cells:
+        polygon_coords = []
+        for point in cell.get('polygon', []):
+            if len(point) == 2:
+                x, y = point
+            else:
+                x, y = point["x"], point["y"] 
+            # Original formula from Shakti's commit:
+            lat = (y / 111320.0) + 18.5204
+            lon = (x / (math.cos(18.5204 * math.pi / 180.0) * 111320.0)) + 73.8567
+            polygon_coords.append([lon, lat])
+        feature = {
+            "type": "Feature",
+            "properties": {
+                "site_id": cell.get('site_id'),
+                "area": cell.get('area', 0),
+                "is_underserved": cell.get('is_underserved', 0),
+                "facility_name": cell.get('facility_name', f"Facility {cell.get('site_id')}")
+            },
+            "geometry": {"type": "Polygon", "coordinates": [polygon_coords]}
+        }
+        features.append(feature)
+    return {"type": "FeatureCollection", "features": features}

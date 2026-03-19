@@ -6,7 +6,7 @@
 
 typedef struct vertex {
     double x, y;
-    struct half_edge *incident_edge;
+    half_edge_t* incident_edge;
 } vertex_t;
 
 typedef struct half_edge {
@@ -26,16 +26,20 @@ typedef struct face {
 } face_t;
 
 typedef struct dcel {
-    vertex_t    **vertices;  int nv;
-    half_edge_t **edges;     int ne;
-    face_t      **faces;     int nf;
+    vertex_t** vertices;
+    int nv;
+    half_edge_t** edges;
+    int ne;
+    face_t** faces;
+    int nf;
+    
+    // Internal capacities for dynamic array reallocation
+    int max_v, max_e, max_f;
 } dcel_t;
 
 
-dcel_t  *voronoi_build(point_t *sites, int n);
-face_t **dcel_neighbours(dcel_t *d, int site_id, int *out_count);
-void     voronoi_free(dcel_t *d);
-void     voronoi_insert_site(dcel_t *d, point_t new_site);
+// Incremental insertion
+void voronoi_insert_site(dcel_t* d, point_t new_site);
 
 
 void   clip_to_bbox(dcel_t *d, double xmin, double ymin, double xmax, double ymax);
