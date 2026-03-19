@@ -1,0 +1,25 @@
+{
+  "total_count": 644,
+  "counts_by_type": {
+    "fire_station": 10,
+    "hospital": 634
+  },
+  "bbox": {
+    "south": 18.4,
+    "west": 73.7,
+    "north": 18.65,
+    "east": 74.05
+  },
+  "projection": {
+    "type": "equirectangular",
+    "origin": {
+      "lat": 18.5204,
+      "lon": 73.8567
+    },
+    "units": "metres",
+    "x_axis": "east",
+    "y_axis": "north"
+  },
+  "source": "OpenStreetMap via Overpass API",
+  "generated_at": "2026-03-19T04:12:15Z"
+}
